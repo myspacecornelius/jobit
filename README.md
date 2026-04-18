@@ -1,104 +1,117 @@
 # Job Application AI Agent
 
-An intelligent AI-powered tool that automates the job application process by:
-1. Scraping job listings from platforms like LinkedIn
-2. Analyzing job descriptions to extract key requirements
-3. Automatically tailoring your CV to match job requirements
-4. Generating customized cover letters
+Scrape LinkedIn jobs, extract requirements, and generate tailored CVs — all from one CLI or a local web UI.
 
-## Features
+- **Job Scraping** — pull public LinkedIn job listings
+- **Skill Extraction** — spaCy-based keyword matching against a curated skill ontology
+- **CV Customization** — rewrite the skills section of a `.docx` template per job
+- **Batch Mode** — generate one CV per job in one run
+- **Web UI** — Flask-based, runs locally
 
-- **Job Scraping**: Automatically search and collect job listings from LinkedIn
-- **Intelligent Analysis**: Extract key skills and requirements from job descriptions
-- **CV Customization**: Tailor your CV to highlight relevant skills for each job
-- **Batch Processing**: Generate multiple tailored CVs for different jobs at once
-- **User-Friendly Interface**: Simple web interface to control the entire process
+## Quickstart (5 minutes)
 
-## Setup
-
-### Prerequisites
-
-- Python 3.8+
-- Chrome browser (for web scraping)
-
-### Installation
-
-1. Clone this repository:
 ```bash
-git clone https://github.com/yourusername/Job-apply-AI-agent.git
+git clone <your-fork-url>
 cd Job-apply-AI-agent
-```
 
-2. Run the installation script:
-```bash
-# On Unix-based systems (macOS, Linux)
+# macOS / Linux
 ./install.sh
 
-# On Windows
+# Windows
 install.bat
 ```
 
-This will:
-- Create a virtual environment
-- Install all dependencies
-- Download the required spaCy language model
-- Install the package in development mode
+The installer creates a venv, installs deps, downloads the spaCy model,
+copies `.env.example` → `.env`, and runs `job-apply-ai doctor` to verify everything.
 
-## Usage
+Then:
 
-### Web Interface
-
-1. Start the web interface:
 ```bash
-# Activate the virtual environment first
-source venv/bin/activate  # On Unix-based systems
-venv\Scripts\activate.bat  # On Windows
+source venv/bin/activate          # or: venv\Scripts\activate.bat on Windows
+job-apply-ai web                  # open http://127.0.0.1:5000
+```
 
-# Start the web app
+## Prerequisites
+
+- Python 3.8+
+- Google Chrome installed (the scraper drives it via undetected-chromedriver)
+- Optional: an OpenAI API key, only if you use AI-based features
+
+## Configuration
+
+All settings live in `.env` (copied from `.env.example` on first install).
+Every key is optional — defaults are applied when unset. Highlights:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `OPENAI_API_KEY` | *(unset)* | Required only for AI features |
+| `JOBIT_HOST` / `JOBIT_PORT` | `127.0.0.1` / `5000` | Web UI bind |
+| `JOBIT_OUTPUT_DIR` | `./outputs` | Parent dir for jobs + CVs |
+| `JOBIT_HEADLESS` | `true` | Run Chrome headless |
+| `JOBIT_MAX_RETRIES` | `2` | Scraper retries on failure |
+| `JOBIT_JOB_CARD_SELECTORS` | `base-card,job-search-card` | Fallback list of LinkedIn CSS classes |
+| `JOBIT_SPACY_MODEL` | `en_core_web_sm` | spaCy model to use |
+| `JOBIT_SPACY_AUTO_DOWNLOAD` | `false` | Auto-download the model on first run |
+
+The scraper selectors are comma-separated fallback lists. When LinkedIn
+ships a DOM change, you can usually update `.env` without editing code.
+See `.env.example` for the full list.
+
+## CLI
+
+```bash
+# Quick health check — run after install or when something misbehaves
+job-apply-ai doctor
+
+# Scrape jobs to Excel
+job-apply-ai scrape --keyword "Software Engineer" --location "Berlin" --max-jobs 10
+
+# Tailor a CV to one job description
+job-apply-ai tailor --cv path/to/cv.docx --job path/to/job.txt
+
+# Batch: one CV per row in an Excel file
+job-apply-ai batch --cv path/to/cv.docx --jobs-file outputs/jobs/linkedin_jobs_YYYY-MM-DD.xlsx
+
+# Start the web UI (honours JOBIT_HOST / JOBIT_PORT from .env)
 job-apply-ai web
 ```
 
-2. Open your browser and go to: http://localhost:5000
+## Web UI flow
 
-3. Upload your base CV template
+1. Upload your `.docx` CV template
+2. Enter job title + location
+3. Pick jobs and click "Make CV" (or "Generate All")
+4. Download the tailored `.docx` (or the full ZIP)
 
-4. Search for jobs by entering a job title and location
+## Project layout
 
-5. Generate tailored CVs for all jobs or for specific jobs
-
-### Command Line
-
-The application also provides a command-line interface:
-
-```bash
-# Scrape job listings
-job-apply-ai scrape --keyword "Software Engineer" --location "Berlin" --max-jobs 5
-
-# Generate tailored CVs for all jobs in an Excel file
-job-apply-ai batch --cv path/to/cv_template.docx --jobs-file path/to/jobs.xlsx
-
-# Generate a tailored CV for a single job description
-job-apply-ai tailor --cv path/to/cv_template.docx --job path/to/job_description.txt
+```
+job_apply_ai/
+├── __init__.py       # auto-loads .env
+├── __main__.py       # CLI entry point
+├── config.py         # central config + env parsing
+├── scraper/          # LinkedIn scraper (retries + fallback selectors)
+├── cv_modifier/      # spaCy skill extraction + CV rewriting
+├── ui/               # Flask web app
+└── utils/            # logging + file helpers
+outputs/              # jobs & tailored CVs land here (configurable)
 ```
 
-## Project Structure
+## Troubleshooting
 
-- `job_apply_ai/scraper/`: Job listing scraping modules
-- `job_apply_ai/cv_modifier/`: CV customization functionality
-- `job_apply_ai/utils/`: Utility functions and helpers
-- `job_apply_ai/ui/`: User interface components
-- `job_apply_ai/outputs/`: Output directories for jobs and CVs
-  - `job_apply_ai/outputs/jobs/`: Contains Excel files with job listings
-  - `job_apply_ai/outputs/cvs/`: Contains generated CV files
+- **"No jobs found"** — run `job-apply-ai doctor`. If everything is OK,
+  LinkedIn may have changed its DOM; override `JOBIT_JOB_CARD_SELECTORS`
+  in `.env` (e.g. to `base-card,new-card-class`) and re-run.
+- **"spaCy model 'en_core_web_sm' is not installed"** — run
+  `python -m spacy download en_core_web_sm`, or set
+  `JOBIT_SPACY_AUTO_DOWNLOAD=true` in `.env`.
+- **"Could not start Chrome"** — install Google Chrome and ensure it is
+  on PATH (macOS usually works out of the box from `/Applications`).
 
 ## Testing
 
-For detailed testing instructions, see [TESTING_GUIDE.md](TESTING_GUIDE.md).
+See [TESTING_GUIDE.md](TESTING_GUIDE.md).
 
 ## License
 
 MIT
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.

@@ -1,249 +1,273 @@
-"""
-LinkedIn Job Scraper Module
+"""LinkedIn job scraper.
 
-This module provides functionality to scrape job listings from LinkedIn,
-including job titles, company names, links, and full job descriptions.
+Pulls tunables (timeouts, selectors, retry counts, user agent, URL template)
+from `job_apply_ai.config`, so overriding a setting via env or `.env` is
+enough to adapt to LinkedIn DOM changes without code edits.
 """
+
+from __future__ import annotations
 
 import time
-import logging
-from datetime import datetime, timedelta
+from datetime import datetime
+from typing import List, Optional, Tuple
+from urllib.parse import quote_plus
+
 import pandas as pd
 import undetected_chromedriver as uc
 from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, NoSuchElementException
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+from selenium.common.exceptions import (
+    NoSuchElementException,
+    TimeoutException,
+    WebDriverException,
 )
-logger = logging.getLogger(__name__)
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import WebDriverWait
+
+from job_apply_ai.config import ScraperConfig, get_config
+from job_apply_ai.utils.logging import get_logger
+
+logger = get_logger(__name__)
+
+
+class ScraperError(RuntimeError):
+    """Raised when the scraper cannot recover (e.g. Chrome not installed)."""
+
 
 class LinkedInScraper:
-    """
-    A class to scrape job listings from LinkedIn.
-    """
-    
-    def __init__(self, headless=True):
-        """
-        Initialize the LinkedIn scraper.
-        
-        Args:
-            headless (bool): Whether to run the browser in headless mode.
-        """
-        self.headless = headless
-        
+    """Scrape public LinkedIn job listings."""
+
+    def __init__(self, headless: Optional[bool] = None, config: Optional[ScraperConfig] = None):
+        self.config = config or get_config().scraper
+        self.headless = self.config.headless if headless is None else headless
+
     def _configure_driver(self):
-        """
-        Configure and return a Chrome WebDriver.
-        
-        Returns:
-            WebDriver: Configured Chrome WebDriver instance.
-        """
         options = webdriver.ChromeOptions()
         if self.headless:
-            options.add_argument("--headless")
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--disable-notifications")
-        options.add_argument("--disable-extensions")
-        options.add_argument("--disable-gpu")
-        options.add_argument("--window-size=1920,1080")
-        
-        # Add user agent to avoid detection
-        options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
-        
-        driver = uc.Chrome(options=options)
-        return driver
-    
-    def scrape_job_listings(self, keyword, location, max_jobs=10, max_days_old=14):
-        """
-        Scrape job listings from LinkedIn based on keyword and location.
-        
-        Args:
-            keyword (str): Job title or keyword to search for.
-            location (str): Location to search in.
-            max_jobs (int): Maximum number of jobs to scrape.
-            max_days_old (int): Maximum age of job postings in days.
-            
-        Returns:
-            list: List of dictionaries containing job details.
-        """
-        logger.info(f"Scraping LinkedIn jobs for '{keyword}' in '{location}'")
-        
-        driver = self._configure_driver()
-        search_url = f"https://www.linkedin.com/jobs/search?keywords={keyword.replace(' ', '%20')}&location={location.replace(' ', '%20')}"
-        
+            options.add_argument("--headless=new")
+        for flag in (
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-notifications",
+            "--disable-extensions",
+            "--disable-gpu",
+            "--window-size=1920,1080",
+        ):
+            options.add_argument(flag)
+        options.add_argument(f"user-agent={self.config.user_agent}")
+
         try:
-            driver.get(search_url)
-            
-            # Scroll to load more jobs
-            for _ in range(3):
-                driver.execute_script("window.scrollBy(0, 800);")
-                time.sleep(2)
-            
-            # Wait for job listings to appear
-            wait = WebDriverWait(driver, 15)
+            return uc.Chrome(options=options)
+        except WebDriverException as exc:
+            raise ScraperError(
+                "Could not start Chrome. Install Google Chrome and ensure it is "
+                "on PATH, then re-run. Original error: " + str(exc)
+            ) from exc
+
+    def _find_first(self, parent, selectors: List[str], by=By.CSS_SELECTOR):
+        """Return the first element matching any of `selectors`, else None."""
+        for selector in selectors:
             try:
-                wait.until(EC.presence_of_element_located((By.CLASS_NAME, "base-card")))
+                return parent.find_element(by, selector)
+            except NoSuchElementException:
+                continue
+        return None
+
+    def _wait_for_any(self, driver, selectors: List[str], timeout: int, by=By.CLASS_NAME):
+        """Wait until any of the given selectors is present. Returns the one that matched."""
+        wait = WebDriverWait(driver, timeout)
+        for selector in selectors:
+            try:
+                wait.until(EC.presence_of_element_located((by, selector)))
+                return selector
             except TimeoutException:
-                logger.warning("No job listings found")
-                driver.quit()
-                return []
-            
-            jobs = []
-            today = datetime.today()
-            job_elements = driver.find_elements(By.CLASS_NAME, "base-card")
-            
-            for job in job_elements[:max_jobs]:
-                try:
-                    title = job.find_element(By.CSS_SELECTOR, "h3").text.strip()
-                    company = job.find_element(By.CSS_SELECTOR, "h4").text.strip()
-                    link = job.find_element(By.TAG_NAME, "a").get_attribute("href")
-                    
-                    # Check job posting date
+                continue
+        return None
+
+    def scrape_job_listings(
+        self,
+        keyword: str,
+        location: str,
+        max_jobs: int = 10,
+        max_days_old: Optional[int] = None,
+    ) -> List[dict]:
+        """Return a list of job dicts from the LinkedIn public search page."""
+        max_days_old = max_days_old if max_days_old is not None else self.config.max_days_old
+        logger.info("Searching LinkedIn for '%s' in '%s'", keyword, location)
+
+        search_url = self.config.search_url_template.format(
+            keyword=quote_plus(keyword),
+            location=quote_plus(location),
+        )
+
+        last_error: Optional[Exception] = None
+        for attempt in range(1, self.config.max_retries + 2):
+            driver = None
+            try:
+                driver = self._configure_driver()
+                driver.get(search_url)
+
+                for _ in range(self.config.scroll_count):
+                    driver.execute_script(f"window.scrollBy(0, {self.config.scroll_pixels});")
+                    time.sleep(self.config.scroll_pause)
+
+                matched_selector = self._wait_for_any(
+                    driver,
+                    self.config.job_card_selectors,
+                    timeout=self.config.page_timeout,
+                    by=By.CLASS_NAME,
+                )
+                if not matched_selector:
+                    logger.warning(
+                        "No job cards found using selectors %s. LinkedIn may have "
+                        "changed its DOM — override JOBIT_JOB_CARD_SELECTORS in .env.",
+                        self.config.job_card_selectors,
+                    )
+                    return []
+
+                job_elements = driver.find_elements(By.CLASS_NAME, matched_selector)
+                jobs = self._extract_jobs(job_elements, max_jobs, max_days_old)
+                logger.info("Scraped %d job listings (attempt %d)", len(jobs), attempt)
+                return jobs
+
+            except (TimeoutException, WebDriverException) as exc:
+                last_error = exc
+                logger.warning(
+                    "Scrape attempt %d/%d failed: %s",
+                    attempt,
+                    self.config.max_retries + 1,
+                    exc,
+                )
+                if attempt <= self.config.max_retries:
+                    time.sleep(self.config.retry_backoff ** attempt)
+            finally:
+                if driver is not None:
                     try:
-                        date_element = job.find_element(By.CSS_SELECTOR, "time")
-                        posted_time = date_element.get_attribute("datetime")
-                        if posted_time:
-                            posted_date = datetime.strptime(posted_time[:10], "%Y-%m-%d")
-                            days_ago = (today - posted_date).days
-                            if days_ago > max_days_old:
-                                logger.info(f"Skipping job: {title} (Posted {days_ago} days ago)")
-                                continue
-                        else:
-                            days_ago = "Unknown"
-                    except NoSuchElementException:
-                        logger.warning(f"Could not find post time for: {title}, assuming it's recent")
-                        days_ago = "Unknown"
-                    
-                    jobs.append({
+                        driver.quit()
+                    except Exception:
+                        pass
+
+        logger.error("Giving up after %d attempts: %s", self.config.max_retries + 1, last_error)
+        return []
+
+    def _extract_jobs(self, job_elements, max_jobs: int, max_days_old: int) -> List[dict]:
+        jobs: List[dict] = []
+        today = datetime.today()
+
+        for job in job_elements[:max_jobs]:
+            try:
+                title_el = self._find_first(job, ["h3", ".base-search-card__title"])
+                company_el = self._find_first(job, ["h4", ".base-search-card__subtitle"])
+                link_el = self._find_first(job, ["a"], by=By.TAG_NAME)
+
+                if not (title_el and company_el and link_el):
+                    continue
+
+                title = title_el.text.strip()
+                company = company_el.text.strip()
+                link = link_el.get_attribute("href")
+
+                days_ago: object = "Unknown"
+                try:
+                    date_element = job.find_element(By.CSS_SELECTOR, "time")
+                    posted_time = date_element.get_attribute("datetime")
+                    if posted_time:
+                        posted_date = datetime.strptime(posted_time[:10], "%Y-%m-%d")
+                        delta_days = (today - posted_date).days
+                        if delta_days > max_days_old:
+                            logger.debug("Skipping %s (posted %d days ago)", title, delta_days)
+                            continue
+                        days_ago = delta_days
+                except NoSuchElementException:
+                    pass
+
+                jobs.append(
+                    {
                         "title": title,
                         "company": company,
                         "link": link,
                         "source": "LinkedIn",
-                        "posted_days_ago": days_ago
-                    })
-                    
-                except Exception as e:
-                    logger.error(f"Error processing job listing: {str(e)}")
-                    continue
-            
-            logger.info(f"Successfully scraped {len(jobs)} job listings")
-            return jobs
-            
-        except Exception as e:
-            logger.error(f"Error during job scraping: {str(e)}")
-            return []
-            
-        finally:
-            driver.quit()
-    
-    def fetch_job_description(self, job_url):
-        """
-        Fetch the full job description from a LinkedIn job URL.
-        
-        Args:
-            job_url (str): URL of the LinkedIn job posting.
-            
-        Returns:
-            tuple: (job_title, company_name, job_description)
-        """
-        logger.info(f"Fetching job description from {job_url}")
-        
-        driver = self._configure_driver()
-        
+                        "posted_days_ago": days_ago,
+                    }
+                )
+            except Exception as exc:  # defensive — one bad card shouldn't kill the run
+                logger.debug("Skipping malformed job card: %s", exc)
+                continue
+        return jobs
+
+    def fetch_job_description(self, job_url: str) -> Tuple[str, str, str]:
+        """Return (title, company, description) for a single posting."""
+        logger.info("Fetching description from %s", job_url)
+
+        driver = None
         try:
+            driver = self._configure_driver()
             driver.get(job_url)
-            wait = WebDriverWait(driver, 15)
-            
-            # Job Title
-            try:
-                title_elem = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "h1.topcard__title")))
-                job_title = title_elem.text.strip()
-            except TimeoutException:
-                logger.warning("Could not find job title")
-                job_title = ""
-            
-            # Company Name
-            try:
-                company_elem = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "a.topcard__org-name-link")))
-                company_name = company_elem.text.strip()
-            except TimeoutException:
-                logger.warning("Could not find company name")
-                company_name = ""
-            
-            # Job Description
-            try:
-                desc_elem = wait.until(EC.presence_of_element_located((By.CLASS_NAME, "description__text")))
-                job_description = desc_elem.text.strip()
-            except TimeoutException:
-                logger.warning("Could not find job description")
-                job_description = ""
-            
-            return job_title, company_name, job_description
-            
-        except Exception as e:
-            logger.error(f"Error fetching job description: {str(e)}")
+
+            title = self._wait_for_text(driver, self.config.title_selectors, By.CSS_SELECTOR)
+            company = self._wait_for_text(driver, self.config.company_selectors, By.CSS_SELECTOR)
+            description = self._wait_for_text(driver, self.config.description_selectors, By.CLASS_NAME)
+
+            return title, company, description
+
+        except WebDriverException as exc:
+            logger.error("Error fetching description: %s", exc)
             return "", "", ""
-            
         finally:
-            driver.quit()
-    
-    def save_jobs_to_excel(self, jobs, filename=None):
-        """
-        Save scraped jobs to an Excel file.
-        
-        Args:
-            jobs (list): List of job dictionaries.
-            filename (str, optional): Output filename. If None, generates a filename with today's date.
-            
-        Returns:
-            str: Path to the saved Excel file.
-        """
+            if driver is not None:
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
+
+    def _wait_for_text(self, driver, selectors: List[str], by) -> str:
+        wait = WebDriverWait(driver, self.config.page_timeout)
+        for selector in selectors:
+            try:
+                el = wait.until(EC.presence_of_element_located((by, selector)))
+                text = el.text.strip()
+                if text:
+                    return text
+            except TimeoutException:
+                continue
+        logger.warning("None of these selectors yielded text: %s", selectors)
+        return ""
+
+    def save_jobs_to_excel(self, jobs: List[dict], filename: Optional[str] = None) -> Optional[str]:
+        """Write jobs to an Excel file. Returns the path, or None if no jobs."""
         if not jobs:
             logger.warning("No jobs to save")
             return None
-        
-        df = pd.DataFrame(jobs)
-        
+
         if filename is None:
             today_date = datetime.today().strftime("%Y-%m-%d")
-            filename = f"linkedin_jobs_{today_date}.xlsx"
-        
+            filename = str(get_config().paths.jobs_dir / f"linkedin_jobs_{today_date}.xlsx")
+
+        df = pd.DataFrame(jobs)
         df.to_excel(filename, index=False)
-        logger.info(f"Saved {len(jobs)} jobs to {filename}")
-        
+        logger.info("Saved %d jobs to %s", len(jobs), filename)
         return filename
 
 
 def main():
-    """
-    Main function to demonstrate the LinkedIn scraper.
-    """
     keyword = input("Enter job title (e.g., Software Engineer): ")
     location = input("Enter location (e.g., Remote, New York, Berlin): ")
-    
-    scraper = LinkedInScraper(headless=True)
+
+    scraper = LinkedInScraper()
     jobs = scraper.scrape_job_listings(keyword, location)
-    
-    if jobs:
-        # Fetch full job descriptions
-        for i, job in enumerate(jobs):
-            logger.info(f"Fetching description for job {i+1}/{len(jobs)}: {job['title']}")
-            title, company, description = scraper.fetch_job_description(job['link'])
-            jobs[i]['description'] = description
-        
-        # Save to Excel
-        filename = scraper.save_jobs_to_excel(jobs)
-        print(f"\n✅ Jobs saved to {filename}")
-    else:
-        print("\n❌ No LinkedIn jobs found.")
+
+    if not jobs:
+        print("\nNo LinkedIn jobs found.")
+        return
+
+    for i, job in enumerate(jobs):
+        logger.info("Fetching description for job %d/%d: %s", i + 1, len(jobs), job["title"])
+        _, _, description = scraper.fetch_job_description(job["link"])
+        jobs[i]["description"] = description
+
+    filename = scraper.save_jobs_to_excel(jobs)
+    print(f"\nJobs saved to {filename}")
 
 
 if __name__ == "__main__":
-    main() 
+    main()

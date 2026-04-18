@@ -1,43 +1,41 @@
-"""
-Web Interface for Job Application AI Agent
+"""Flask web interface for the Job Application AI Agent."""
 
-This module provides a Flask web application for the job application AI agent.
-"""
-
-import os
-import logging
-import tempfile
-from datetime import datetime
-from flask import Flask, render_template, request, redirect, url_for, flash, send_file, session, jsonify
-import pandas as pd
-import zipfile
 import io
+import os
+import zipfile
+from datetime import datetime
 
-from job_apply_ai.scraper.linkedin import LinkedInScraper
-from job_apply_ai.cv_modifier.cv_analyzer import CVAnalyzer, CVModifier, batch_process_jobs
-from job_apply_ai.utils.helpers import ensure_directory_exists
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+import pandas as pd
+from flask import (
+    Flask,
+    flash,
+    redirect,
+    render_template,
+    request,
+    send_file,
+    session,
+    url_for,
 )
-logger = logging.getLogger(__name__)
 
-# Initialize Flask app
+from job_apply_ai.config import get_config
+from job_apply_ai.cv_modifier.cv_analyzer import CVAnalyzer, CVModifier
+from job_apply_ai.scraper.linkedin import LinkedInScraper
+from job_apply_ai.utils.helpers import ensure_directory_exists, sanitize_filename
+from job_apply_ai.utils.logging import get_logger
+
+logger = get_logger(__name__)
+
+_config = get_config()
+
 app = Flask(__name__)
-app.secret_key = os.environ.get('SECRET_KEY', 'dev_key_for_testing')
-app.config['UPLOAD_FOLDER'] = os.path.join(tempfile.gettempdir(), 'job_apply_ai')
-ensure_directory_exists(app.config['UPLOAD_FOLDER'])
-
-# Create output directories
-app.config['CV_OUTPUT_DIR'] = os.path.join(app.config['UPLOAD_FOLDER'], 'cvs')
-app.config['JOBS_OUTPUT_DIR'] = os.path.join(app.config['UPLOAD_FOLDER'], 'jobs')
-ensure_directory_exists(app.config['CV_OUTPUT_DIR'])
-ensure_directory_exists(app.config['JOBS_OUTPUT_DIR'])
-
-# Ensure session data is saved
+app.secret_key = _config.web.secret_key
+app.config['UPLOAD_FOLDER'] = str(_config.paths.uploads_dir)
+app.config['CV_OUTPUT_DIR'] = str(_config.paths.cvs_dir)
+app.config['JOBS_OUTPUT_DIR'] = str(_config.paths.jobs_dir)
 app.config['SESSION_TYPE'] = 'filesystem'
+
+for _dir in (app.config['UPLOAD_FOLDER'], app.config['CV_OUTPUT_DIR'], app.config['JOBS_OUTPUT_DIR']):
+    ensure_directory_exists(_dir)
 
 @app.route('/')
 def index():
@@ -124,7 +122,8 @@ def upload_cv():
             return redirect(request.url)
         
         if file and file.filename.endswith('.docx'):
-            filename = os.path.join(app.config['UPLOAD_FOLDER'], 'cv_template.docx')
+            safe_name = sanitize_filename(os.path.basename(file.filename)) or 'cv_template.docx'
+            filename = os.path.join(app.config['UPLOAD_FOLDER'], safe_name)
             file.save(filename)
             session['cv_template'] = filename
             flash('CV template uploaded successfully', 'success')
@@ -226,11 +225,11 @@ def make_cv(job_id):
         if modifier.update_skills_section(matched_categories):
             # Save the modified CV
             today_date = datetime.today().strftime("%Y-%m-%d")
-            safe_company = job['company'].replace(' ', '_')
-            safe_title = job['title'].replace(' ', '_')
+            safe_company = sanitize_filename(job['company'])
+            safe_title = sanitize_filename(job['title'])
             output_filename = f"CV_{today_date}_{safe_company}_{safe_title}.docx"
             output_path = os.path.join(app.config['CV_OUTPUT_DIR'], output_filename)
-            
+
             if modifier.save_modified_cv(output_path):
                 # Store the path for download
                 session['current_cv'] = output_path
@@ -307,8 +306,8 @@ def make_all_cvs():
             if modifier.update_skills_section(matched_categories):
                 # Save the modified CV
                 today_date = datetime.today().strftime("%Y-%m-%d")
-                safe_company = job['company'].replace(' ', '_')
-                safe_title = job['title'].replace(' ', '_')
+                safe_company = sanitize_filename(job['company'])
+                safe_title = sanitize_filename(job['title'])
                 output_filename = f"CV_{today_date}_{safe_company}_{safe_title}.docx"
                 output_path = os.path.join(app.config['CV_OUTPUT_DIR'], output_filename)
                 
@@ -383,17 +382,19 @@ def server_error(e):
     logger.error(f"Server error: {str(e)}")
     return render_template('500.html'), 500
 
-def main():
-    """Run the Flask application."""
-    # Create templates directory if it doesn't exist
+def _bootstrap_templates():
     templates_dir = os.path.join(os.path.dirname(__file__), 'templates')
     ensure_directory_exists(templates_dir)
-    
-    # Create basic templates if they don't exist
     create_basic_templates(templates_dir)
-    
-    # Run the app
-    app.run(debug=True, host='0.0.0.0', port=5050)
+
+
+_bootstrap_templates()
+
+
+def main():
+    """Run the Flask app using the shared config (used when this file is run directly)."""
+    cfg = get_config().web
+    app.run(host=cfg.host, port=cfg.port, debug=cfg.debug)
 
 def create_basic_templates(templates_dir):
     """Create basic HTML templates if they don't exist."""
