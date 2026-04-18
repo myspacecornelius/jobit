@@ -1,0 +1,54 @@
+# Copy this file to profile.yaml and fill in your real details.
+# This is what the auto-applicator uses to answer common form fields.
+
+# Contact / identity (required fields)
+first_name: Jane
+last_name: Doe
+email: jane.doe@example.com
+phone: "+1 555 123 4567"
+location: "San Francisco, CA"
+linkedin_url: https://www.linkedin.com/in/jane-doe
+portfolio_url: https://jane.dev
+github_url: https://github.com/janedoe
+
+# Work authorization
+authorized_to_work: true
+requires_sponsorship: false
+
+# Logistics
+willing_to_relocate: false
+willing_to_commute: true
+remote_only: false
+
+# Compensation & experience
+years_experience: 6
+current_company: Acme Corp
+current_title: Senior Software Engineer
+desired_salary_usd: 180000
+notice_period_weeks: 2
+
+# Years per skill — used when forms ask "how many years of X".
+skill_years:
+  python: 6
+  typescript: 4
+  react: 3
+  aws: 5
+  docker: 4
+  kubernetes: 2
+
+# Files the applicator will upload. Absolute or relative paths.
+resume_path: ./outputs/cvs/Tailored_CV.docx
+cover_letter_path: ./outputs/cvs/cover_letter.docx
+
+# EEO self-identification (leave as-is to decline).
+gender: Decline to self-identify
+ethnicity: Decline to self-identify
+veteran_status: I am not a protected veteran
+disability_status: I do not wish to answer
+
+# Any extra key/value pairs here (or under `extras:`) are matched against
+# unknown form questions by exact text. Useful for company-specific Qs.
+extras:
+  "Why do you want to work here?": |
+    I'm drawn to your company's mission and track record of shipping impactful
+    products at scale. My background in [X] aligns with the role.

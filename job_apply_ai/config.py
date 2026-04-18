@@ -102,12 +102,30 @@ class OpenAIConfig:
 
 
 @dataclass
+class ApplicatorConfig:
+    profile_path: Path
+    qa_bank_path: Path
+    cookies_path: Path
+    tracker_db: Path
+    cover_letter_template: Optional[Path]
+    max_per_hour: int
+    delay_min: float
+    delay_max: float
+    confirm_before_submit: bool
+    easy_apply_selectors: List[str]
+    submit_button_selectors: List[str]
+    next_button_selectors: List[str]
+    review_button_selectors: List[str]
+
+
+@dataclass
 class Config:
     paths: Paths
     web: WebConfig
     scraper: ScraperConfig
     nlp: NLPConfig
     openai: OpenAIConfig
+    applicator: ApplicatorConfig
     log_level: str
 
 
@@ -190,15 +208,63 @@ def _default_openai() -> OpenAIConfig:
     )
 
 
+def _default_applicator(paths: Paths) -> ApplicatorConfig:
+    cover_letter_env = os.environ.get("JOBIT_COVER_LETTER_TEMPLATE")
+    cover_letter = Path(cover_letter_env).expanduser().resolve() if cover_letter_env else None
+    return ApplicatorConfig(
+        profile_path=_env_path("JOBIT_PROFILE_PATH", paths.root / "profile.yaml"),
+        qa_bank_path=_env_path("JOBIT_QA_BANK_PATH", paths.root / "qa_bank.yaml"),
+        cookies_path=_env_path("JOBIT_COOKIES_PATH", paths.outputs / ".linkedin_cookies.json"),
+        tracker_db=_env_path("JOBIT_TRACKER_DB", paths.outputs / "applications.sqlite"),
+        cover_letter_template=cover_letter,
+        max_per_hour=_env_int("JOBIT_APPLY_MAX_PER_HOUR", 20),
+        delay_min=float(_env_str("JOBIT_APPLY_DELAY_MIN", "8")),
+        delay_max=float(_env_str("JOBIT_APPLY_DELAY_MAX", "25")),
+        confirm_before_submit=_env_bool("JOBIT_APPLY_CONFIRM", False),
+        easy_apply_selectors=_env_list(
+            "JOBIT_EASY_APPLY_SELECTORS",
+            [
+                "button.jobs-apply-button",
+                "button[data-control-name='jobdetails_topcard_inapply']",
+                "button[aria-label*='Easy Apply']",
+            ],
+        ),
+        submit_button_selectors=_env_list(
+            "JOBIT_SUBMIT_SELECTORS",
+            [
+                "button[aria-label='Submit application']",
+                "button[aria-label*='Submit']",
+            ],
+        ),
+        next_button_selectors=_env_list(
+            "JOBIT_NEXT_SELECTORS",
+            [
+                "button[aria-label='Continue to next step']",
+                "button[aria-label*='next']",
+                "button[aria-label*='Next']",
+            ],
+        ),
+        review_button_selectors=_env_list(
+            "JOBIT_REVIEW_SELECTORS",
+            [
+                "button[aria-label='Review your application']",
+                "button[aria-label*='Review']",
+            ],
+        ),
+    )
+
+
 @lru_cache(maxsize=1)
 def get_config() -> Config:
     """Return the process-wide config. Cached after first access."""
+    paths = _default_paths()
     return Config(
-        paths=_default_paths(),
+        paths=paths,
         web=_default_web(),
         scraper=_default_scraper(),
         nlp=_default_nlp(),
         openai=_default_openai(),
+        applicator=_default_applicator(paths),
         log_level=_env_str("JOBIT_LOG_LEVEL", "INFO").upper(),
     )
 

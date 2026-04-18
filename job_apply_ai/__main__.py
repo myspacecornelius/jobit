@@ -46,6 +46,53 @@ def build_parser() -> argparse.ArgumentParser:
     batch.add_argument("--jobs-file", required=True, help="Path to Excel with jobs")
     batch.add_argument("--output-dir", help="Directory for the tailored CVs")
 
+    subparsers.add_parser(
+        "login",
+        help="Open a browser so you can log in to LinkedIn; saves cookies for later",
+    )
+
+    apply_cmd = subparsers.add_parser(
+        "apply",
+        help="Auto-apply to jobs (Easy Apply + external ATS handoff)",
+    )
+    apply_cmd.add_argument(
+        "--jobs-file", required=True,
+        help="Path to Excel with scraped jobs (output of `scrape`)",
+    )
+    apply_cmd.add_argument(
+        "--limit", type=int, default=None, help="Stop after N applications",
+    )
+    apply_cmd.add_argument(
+        "--submit", action="store_true",
+        help="Actually click Submit. Default is dry-run (safer).",
+    )
+    apply_cmd.add_argument(
+        "--external", choices=("skip", "prefill"), default="prefill",
+        help="When a job is hosted on an external ATS: skip it or emit a prefill JSON.",
+    )
+    apply_cmd.add_argument(
+        "--no-browser", action="store_true",
+        help="Don't open external job URLs in a browser (prefill only).",
+    )
+    apply_cmd.add_argument(
+        "--openai-fallback", action="store_true",
+        help="Use OpenAI for questions not in your QA bank.",
+    )
+    apply_cmd.add_argument(
+        "--confirm", action="store_true",
+        help="Prompt for Enter before every Submit click.",
+    )
+
+    track = subparsers.add_parser("track", help="Show recent applications / stats")
+    track.add_argument("--limit", type=int, default=20, help="Rows to show")
+    track.add_argument("--stats", action="store_true", help="Summary counts only")
+
+    cover = subparsers.add_parser("cover-letter", help="Generate a tailored cover letter")
+    cover.add_argument("--job-description", required=True, help="Path to job description text file")
+    cover.add_argument("--title", required=True, help="Job title")
+    cover.add_argument("--company", required=True, help="Company name")
+    cover.add_argument("--hiring-manager", default="", help="Addressee, if known")
+
     subparsers.add_parser("doctor", help="Check your environment and report fixes")
 
     return parser
@@ -184,6 +231,187 @@ def cmd_batch(args) -> int:
     return 0
 
 
+def cmd_login(_args) -> int:
+    from job_apply_ai.applicator.session import interactive_login, SessionError
+
+    cfg = get_config()
+    try:
+        interactive_login(cfg.applicator.cookies_path)
+    except SessionError as exc:
+        logger.error(str(exc))
+        return 1
+    return 0
+
+
+def _load_jobs_from_file(path: str) -> List[dict]:
+    import pandas as pd
+
+    df = pd.read_excel(path)
+    return df.to_dict(orient="records")
+
+
+def cmd_apply(args) -> int:
+    from job_apply_ai.applicator.easy_apply import EasyApplyDriver
+    from job_apply_ai.applicator.external import ExternalApplicationHandler, detect_ats
+    from job_apply_ai.applicator.session import BrowserSession, SessionError
+    from job_apply_ai.profile.qa_bank import QABank
+    from job_apply_ai.profile.user_profile import ProfileError, load_profile
+    from job_apply_ai.tracker import ApplicationTracker
+
+    cfg = get_config()
+
+    if not os.path.isfile(args.jobs_file):
+        logger.error("Jobs file not found: %s", args.jobs_file)
+        return 1
+
+    try:
+        profile = load_profile(cfg.applicator.profile_path)
+    except ProfileError as exc:
+        logger.error(str(exc))
+        return 1
+
+    qa_bank = QABank.load(cfg.applicator.qa_bank_path)
+    tracker = ApplicationTracker(cfg.applicator.tracker_db)
+
+    try:
+        jobs = _load_jobs_from_file(args.jobs_file)
+    except Exception as exc:
+        logger.error("Could not read %s: %s", args.jobs_file, exc)
+        return 1
+
+    easy_jobs: List[dict] = []
+    external_jobs: List[dict] = []
+    for job in jobs:
+        url = job.get("link") or job.get("url") or ""
+        if not url:
+            continue
+        host = (url.split("/")[2] if "//" in url else "").lower()
+        if "linkedin.com" in host:
+            easy_jobs.append(job)
+        else:
+            external_jobs.append(job)
+
+    logger.info("Queued %d LinkedIn + %d external jobs", len(easy_jobs), len(external_jobs))
+
+    if args.confirm:
+        cfg.applicator.confirm_before_submit = True
+
+    applied = 0
+    if easy_jobs:
+        session = BrowserSession()
+        try:
+            session.start()
+        except SessionError as exc:
+            logger.error("%s  Tip: run `job-apply-ai login` first.", exc)
+            return 1
+
+        try:
+            if not session.is_logged_in():
+                logger.error(
+                    "Not logged into LinkedIn. Run `job-apply-ai login` to save cookies."
+                )
+                return 1
+
+            driver = EasyApplyDriver(
+                session=session,
+                profile=profile,
+                qa_bank=qa_bank,
+                tracker=tracker,
+                dry_run=not args.submit,
+                openai_fallback=args.openai_fallback,
+            )
+            results = driver.apply_many(easy_jobs, limit=args.limit)
+            applied = sum(1 for r in results if r.status.value == "applied")
+            for r in results:
+                logger.info("  [%s] %s — %s", r.status.value, r.job_url, r.note)
+        finally:
+            session.stop()
+
+    if external_jobs and args.external == "prefill":
+        handler = ExternalApplicationHandler(profile, qa_bank, tracker)
+        paths = handler.handle_many(
+            external_jobs,
+            open_browser=not args.no_browser,
+            openai_fallback=args.openai_fallback,
+        )
+        for p in paths:
+            logger.info("  [prefill] %s", p)
+
+    logger.info(
+        "Done. %d actual submits, %d external prefills, %d total tracked.",
+        applied,
+        len(external_jobs) if args.external == "prefill" else 0,
+        tracker.stats().get("applied", 0) + tracker.stats().get("dry_run", 0),
+    )
+    return 0
+
+
+def cmd_track(args) -> int:
+    from job_apply_ai.tracker import ApplicationTracker
+
+    tracker = ApplicationTracker(get_config().applicator.tracker_db)
+    if args.stats:
+        stats = tracker.stats()
+        if not stats:
+            print("No applications tracked yet.")
+            return 0
+        for status, n in sorted(stats.items()):
+            print(f"  {status:<14} {n}")
+        return 0
+
+    rows = tracker.recent(limit=args.limit)
+    if not rows:
+        print("No applications tracked yet.")
+        return 0
+    for row in rows:
+        print(
+            f"  [{row['status']:<12}] {row['applied_at'][:19]}  "
+            f"{row['title'][:40]:<40}  @ {row['company'][:24]:<24}  {row['note']}"
+        )
+    return 0
+
+
+def cmd_cover_letter(args) -> int:
+    from job_apply_ai.applicator.cover_letter import (
+        CoverLetterError,
+        CoverLetterRequest,
+        generate_cover_letter,
+    )
+    from job_apply_ai.profile.user_profile import ProfileError, load_profile
+
+    cfg = get_config()
+
+    if not os.path.isfile(args.job_description):
+        logger.error("Job description not found: %s", args.job_description)
+        return 1
+
+    try:
+        profile = load_profile(cfg.applicator.profile_path)
+    except ProfileError as exc:
+        logger.error(str(exc))
+        return 1
+
+    with open(args.job_description, "r", encoding="utf-8") as fh:
+        jd = fh.read()
+
+    try:
+        path = generate_cover_letter(
+            CoverLetterRequest(
+                job_title=args.title,
+                company=args.company,
+                job_description=jd,
+                hiring_manager=args.hiring_manager,
+            ),
+            profile=profile,
+        )
+    except CoverLetterError as exc:
+        logger.error(str(exc))
+        return 1
+
+    logger.info("Cover letter: %s", path)
+    return 0
+
+
 def cmd_doctor(_args) -> int:
     """Validate the environment and print actionable fixes."""
     cfg = get_config()
@@ -246,6 +474,37 @@ def cmd_doctor(_args) -> int:
     else:
         ok.append("OPENAI_API_KEY is set")
 
+    try:
+        import yaml  # noqa: F401
+        ok.append("pyyaml installed")
+    except ImportError:
+        problems.append("pyyaml not installed. Run: pip install -r requirements.txt")
+
+    profile_path = cfg.applicator.profile_path
+    if profile_path.is_file():
+        try:
+            from job_apply_ai.profile.user_profile import load_profile
+            load_profile(profile_path)
+            ok.append(f"profile loaded from {profile_path}")
+        except Exception as exc:
+            problems.append(f"profile at {profile_path} is invalid: {exc}")
+    else:
+        problems.append(
+            f"No profile at {profile_path}. Copy profile.example.yaml -> "
+            f"{profile_path.name} and edit."
+        )
+
+    qa_path = cfg.applicator.qa_bank_path
+    if qa_path.is_file():
+        ok.append(f"qa_bank found at {qa_path}")
+    else:
+        ok.append(f"qa_bank not present at {qa_path} (optional — copy qa_bank.example.yaml)")
+
+    if cfg.applicator.cookies_path.is_file():
+        ok.append(f"LinkedIn cookies saved at {cfg.applicator.cookies_path}")
+    else:
+        ok.append("No LinkedIn cookies yet. Run `job-apply-ai login` before `apply`.")
+
     print("Environment check:\n")
     for item in ok:
         print(f"  [OK]   {item}")
@@ -272,6 +531,10 @@ def main() -> int:
         "scrape": cmd_scrape,
         "tailor": cmd_tailor,
         "batch": cmd_batch,
+        "login": cmd_login,
+        "apply": cmd_apply,
+        "track": cmd_track,
+        "cover-letter": cmd_cover_letter,
         "doctor": cmd_doctor,
     }
     handler = handlers.get(args.command)

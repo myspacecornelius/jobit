@@ -1,12 +1,21 @@
 # Job Application AI Agent
 
-Scrape LinkedIn jobs, extract requirements, and generate tailored CVs — all from one CLI or a local web UI.
+Scrape LinkedIn jobs, extract requirements, generate tailored CVs and cover letters,
+and auto-apply — all from one CLI or a local web UI.
 
 - **Job Scraping** — pull public LinkedIn job listings
 - **Skill Extraction** — spaCy-based keyword matching against a curated skill ontology
 - **CV Customization** — rewrite the skills section of a `.docx` template per job
-- **Batch Mode** — generate one CV per job in one run
+- **Cover Letters** — AI-drafted, per-job `.docx` via OpenAI
+- **Auto-Apply** — drive LinkedIn Easy Apply with a YAML profile + Q&A bank
+- **External ATS handoff** — detect Greenhouse/Lever/Workday/etc. and emit a prefill JSON + open the page for you
+- **Application Tracker** — SQLite log so you never double-apply
 - **Web UI** — Flask-based, runs locally
+
+> ⚠️ **ToS warning.** Automating interactions with LinkedIn violates their
+> Terms of Service. The auto-apply features are provided for you to use against
+> *your own* account at your own risk. Defaults are conservative: dry-run on,
+> rate-limited, fails closed on unknown questions. Start with `--submit` off.
 
 ## Quickstart (5 minutes)
 
@@ -74,7 +83,47 @@ job-apply-ai batch --cv path/to/cv.docx --jobs-file outputs/jobs/linkedin_jobs_Y
 
 # Start the web UI (honours JOBIT_HOST / JOBIT_PORT from .env)
 job-apply-ai web
+
+# --- Auto-apply (opt-in, read the ToS warning first) ---
+
+# 1) One-time: open a browser to log in to LinkedIn; cookies are saved
+job-apply-ai login
+
+# 2) Dry-run apply (default — fills forms and stops before Submit)
+job-apply-ai apply --jobs-file outputs/jobs/linkedin_jobs_YYYY-MM-DD.xlsx --limit 5
+
+# 3) Real submit (double-check your profile.yaml first!)
+job-apply-ai apply --jobs-file outputs/jobs/linkedin_jobs_YYYY-MM-DD.xlsx --submit --confirm
+
+# Generate a tailored cover letter from a job description file
+job-apply-ai cover-letter --title "SRE" --company "Acme" \
+  --job-description outputs/jobs/acme_sre.txt
+
+# See what you've applied to
+job-apply-ai track --limit 20
+job-apply-ai track --stats
 ```
+
+## Auto-apply flow
+
+1. **Profile** — copy `profile.example.yaml` to `profile.yaml` (or point
+   `JOBIT_PROFILE_PATH` elsewhere). Fill in contact info, skill years,
+   resume/cover-letter paths, and defaults for sponsorship, relocation, etc.
+2. **Q&A bank** *(optional but strongly recommended)* — copy
+   `qa_bank.example.yaml` to `qa_bank.yaml`. Any custom question can be
+   answered here; fuzzy matching (≥ 0.82 ratio) handles small wording changes.
+3. **Log in once** — `job-apply-ai login` opens a non-headless browser so you
+   can solve captchas and MFA. Cookies save to
+   `outputs/.linkedin_cookies.json` and persist.
+4. **Dry-run** — `job-apply-ai apply --jobs-file ...` walks each job:
+   - LinkedIn Easy Apply → fill each step, stop before Submit in dry-run.
+   - External ATS (Greenhouse/Lever/Workday/etc.) → emit a prefill JSON to
+     `outputs/prefills/` and open the job URL in your browser.
+   - Unknown question → mark the job `NEEDS_MANUAL` and log the question to
+     `_unknown_questions.yaml` so you can add it to the Q&A bank next time.
+5. **Submit for real** — re-run with `--submit`. `--confirm` adds an Enter
+   prompt before every actual click. Rate limit is `JOBIT_APPLY_MAX_PER_HOUR`
+   (default 20/h) with randomized delays between jobs.
 
 ## Web UI flow
 
@@ -92,9 +141,12 @@ job_apply_ai/
 ├── config.py         # central config + env parsing
 ├── scraper/          # LinkedIn scraper (retries + fallback selectors)
 ├── cv_modifier/      # spaCy skill extraction + CV rewriting
+├── profile/          # user_profile.py + qa_bank.py (YAML-backed)
+├── applicator/       # session + form_filler + easy_apply + external + cover_letter
+├── tracker/          # SQLite application log
 ├── ui/               # Flask web app
 └── utils/            # logging + file helpers
-outputs/              # jobs & tailored CVs land here (configurable)
+outputs/              # jobs, CVs, cover letters, prefills, applications.sqlite
 ```
 
 ## Troubleshooting

@@ -1,0 +1,30 @@
+# Copy to qa_bank.yaml and edit.
+# Exact matches are preferred; fuzzy matching kicks in above 82% similarity.
+# Anything not found here and not derivable from the profile gets logged
+# to _unknown_questions.yaml so you can add it next time.
+
+"Why do you want this role?": |
+  The role aligns strongly with my experience in [X] and my interest in [Y].
+  I'm looking for a team where I can own meaningful problems end-to-end.
+
+"What are your salary expectations?": "See profile"
+
+"Are you authorized to work in the United States?": "Yes"
+"Do you now or will you in the future require sponsorship?": "No"
+
+"How did you hear about this job?": "LinkedIn"
+
+"When can you start?": "Two weeks after an offer is accepted."
+
+"Why are you leaving your current role?": |
+  I've learned a lot in my current role and am looking for a new challenge
+  with larger scope and deeper technical problems.
+
+"Describe a challenging project you've worked on.": |
+  Led the migration of a 50M-row transactional database to a new schema with
+  zero downtime. Designed the dual-write strategy, ran shadow reads for a
+  week, and cut over without a single customer-visible error.
+
+"Do you have any questions for us?": |
+  What does a successful first six months look like for this role? What are
+  the team's top priorities for the next quarter?
