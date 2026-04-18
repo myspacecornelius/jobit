@@ -1,44 +1,76 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# Job Application AI Agent installer (macOS / Linux).
+# Idempotent — safe to re-run.
 
-# Job Application AI Agent Installation Script
+set -euo pipefail
 
-echo "Installing Job Application AI Agent..."
+say() { printf "\n==> %s\n" "$*"; }
+warn() { printf "\n[!] %s\n" "$*" >&2; }
 
-# Check if Python is installed
-if ! command -v python3 &> /dev/null; then
-    echo "Python 3 is not installed. Please install Python 3.8 or higher."
+# 1. Python check
+if ! command -v python3 >/dev/null 2>&1; then
+    warn "python3 is not installed. Install Python 3.8+ and re-run."
     exit 1
 fi
 
-# Check Python version
-python_version=$(python3 -c 'import sys; print(".".join(map(str, sys.version_info[:2])))')
-if [[ $(echo "$python_version < 3.8" | bc) -eq 1 ]]; then
-    echo "Python version $python_version is not supported. Please install Python 3.8 or higher."
+python_version=$(python3 -c 'import sys; print("{}.{}".format(*sys.version_info[:2]))')
+if ! python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)'; then
+    warn "Python ${python_version} is too old. Install Python 3.8+ and re-run."
     exit 1
 fi
+say "Python ${python_version} OK"
 
-# Create virtual environment
-echo "Creating virtual environment..."
-python3 -m venv venv
+# 2. Chrome check (scraper needs it)
+if command -v google-chrome >/dev/null 2>&1 || \
+   command -v chrome >/dev/null 2>&1 || \
+   [ -d "/Applications/Google Chrome.app" ]; then
+    say "Google Chrome detected"
+else
+    warn "Google Chrome was not found. Install Chrome before running the scraper."
+fi
 
-# Activate virtual environment
-echo "Activating virtual environment..."
+# 3. Virtualenv
+if [ ! -d "venv" ]; then
+    say "Creating virtual environment at ./venv"
+    python3 -m venv venv
+fi
+# shellcheck disable=SC1091
 source venv/bin/activate
 
-# Install dependencies
-echo "Installing dependencies..."
-pip install --upgrade pip
+# 4. Dependencies
+say "Installing Python dependencies"
+pip install --upgrade pip >/dev/null
 pip install -r requirements.txt
 
-# Install spaCy model
-echo "Installing spaCy model..."
-python -m spacy download en_core_web_sm
+# 5. spaCy model
+SPACY_MODEL="${JOBIT_SPACY_MODEL:-en_core_web_sm}"
+if python -c "import spacy; spacy.load('${SPACY_MODEL}')" >/dev/null 2>&1; then
+    say "spaCy model '${SPACY_MODEL}' already installed"
+else
+    say "Downloading spaCy model '${SPACY_MODEL}'"
+    python -m spacy download "${SPACY_MODEL}"
+fi
 
-# Install the package in development mode
-echo "Installing the package..."
-pip install -e .
+# 6. Editable install
+say "Installing job-apply-ai in editable mode"
+pip install -e . >/dev/null
 
-echo "Installation complete!"
-echo "To activate the virtual environment, run: source venv/bin/activate"
-echo "To start the web interface, run: job-apply-ai web"
-echo "To see all available commands, run: job-apply-ai --help" 
+# 7. .env bootstrap
+if [ ! -f ".env" ] && [ -f ".env.example" ]; then
+    cp .env.example .env
+    say "Created .env from .env.example — edit it to add your OpenAI key and overrides"
+fi
+
+# 8. Health check
+say "Running environment check"
+set +e
+job-apply-ai doctor
+status=$?
+set -e
+
+echo
+echo "Installation complete."
+echo "  Activate venv : source venv/bin/activate"
+echo "  Web UI        : job-apply-ai web"
+echo "  Help          : job-apply-ai --help"
+exit $status
